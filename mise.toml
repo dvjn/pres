@@ -1,0 +1,26 @@
+[tools]
+rust = "1.94.0"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks.clippy]
+description = "Run clippy lints"
+run = "cargo clippy --all-targets --workspace -- -D warnings"
+
+[tasks.test]
+description = "Run tests"
+run = "cargo test --workspace"
+
+[tasks.check]
+description = "Run fmt, clippy, and tests"
+depends = ["fmt", "clippy", "test"]
+
+[tasks.build]
+description = "Build release binary"
+run = "cargo build --release -p pres"
+
+[tasks.all]
+description = "Check everything then build"
+depends = ["check", "build"]
