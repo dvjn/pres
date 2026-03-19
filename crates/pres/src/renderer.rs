@@ -4,6 +4,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use syntect::easy::HighlightLines;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     parser::{Section, Slide},
@@ -57,6 +58,8 @@ pub fn render_all(sections: &[Section], theme: &Theme) -> RenderedSections {
     }
 }
 
+const CODE_WIDTH: usize = 80;
+
 #[allow(clippy::too_many_lines)]
 pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
     let ss = &theme.syntax_set;
@@ -85,6 +88,26 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
         let line = Line::from(std::mem::take(spans));
         lines.push(line);
     };
+
+    // Compute the active text style from current formatting state
+    let active_style =
+        |in_bold: bool, in_italic: bool, in_strikethrough: bool, theme: &Theme| -> Style {
+            match (in_bold, in_italic, in_strikethrough) {
+                (_, _, true) => theme.strikethrough,
+                (true, true, _) => theme.italic.add_modifier(Modifier::BOLD),
+                (true, false, _) => theme.bold,
+                (false, true, _) => theme.italic,
+                (false, false, _) => theme.normal,
+            }
+        };
+
+    // Push a dim marker span followed by a zero-width restore span
+    // to force the terminal to re-apply active modifiers after DIM
+    let push_marker =
+        |spans: &mut Vec<Span<'static>>, text: &str, marker_style: Style, restore: Style| {
+            spans.push(Span::styled(text.to_owned(), marker_style));
+            spans.push(Span::styled("\u{200B}", restore));
+        };
 
     for event in parser {
         if let Some(ref mut ts) = table {
@@ -196,17 +219,17 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
                 result.lines.push(Line::default());
             }
             Event::End(TagEnd::Heading(_)) => {
-                let (prefix_str, style, prefix_style) = match heading_level {
-                    Some(HeadingLevel::H1) => ("# ", theme.h1, theme.h1_prefix),
-                    Some(HeadingLevel::H2) => ("## ", theme.h2, theme.h2_prefix),
-                    _ => ("### ", theme.h3, theme.h3_prefix),
+                let (prefix_str, style) = match heading_level {
+                    Some(HeadingLevel::H1) => ("# ", theme.h1),
+                    Some(HeadingLevel::H2) => ("## ", theme.h2),
+                    _ => ("### ", theme.h3),
                 };
                 let text: String = current_spans
                     .drain(..)
                     .map(|s| s.content.to_string())
                     .collect();
                 result.lines.push(Line::from(vec![
-                    Span::styled(prefix_str, prefix_style),
+                    Span::styled(prefix_str, theme.marker),
                     Span::styled(text, style),
                 ]));
                 result.lines.push(Line::default());
@@ -222,14 +245,57 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
                 }
             }
 
-            Event::Start(Tag::Strong) => in_bold = true,
-            Event::End(TagEnd::Strong) => in_bold = false,
+            Event::Start(Tag::Strong) => {
+                in_bold = true;
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    let restore = active_style(in_bold, in_italic, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "**", marker_style, restore);
+                }
+            }
+            Event::End(TagEnd::Strong) => {
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    // Restore to style AFTER bold ends
+                    let restore = active_style(false, in_italic, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "**", marker_style, restore);
+                }
+                in_bold = false;
+            }
 
-            Event::Start(Tag::Emphasis) => in_italic = true,
-            Event::End(TagEnd::Emphasis) => in_italic = false,
+            Event::Start(Tag::Emphasis) => {
+                in_italic = true;
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    let restore = active_style(in_bold, in_italic, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "*", marker_style, restore);
+                }
+            }
+            Event::End(TagEnd::Emphasis) => {
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    let restore = active_style(in_bold, false, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "*", marker_style, restore);
+                }
+                in_italic = false;
+            }
 
-            Event::Start(Tag::Strikethrough) => in_strikethrough = true,
-            Event::End(TagEnd::Strikethrough) => in_strikethrough = false,
+            Event::Start(Tag::Strikethrough) => {
+                in_strikethrough = true;
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    let restore = active_style(in_bold, in_italic, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "~~", marker_style, restore);
+                }
+            }
+            Event::End(TagEnd::Strikethrough) => {
+                if link_url.is_none() && !in_blockquote {
+                    let marker_style = theme.marker;
+                    let restore = active_style(in_bold, in_italic, false, theme);
+                    push_marker(&mut current_spans, "~~", marker_style, restore);
+                }
+                in_strikethrough = false;
+            }
 
             Event::Start(Tag::Link { dest_url, .. }) => {
                 link_url = Some(dest_url.to_string());
@@ -238,11 +304,11 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
             Event::End(TagEnd::Link) => {
                 if let Some(url) = link_url.take() {
                     let text = link_text.drain(..).collect::<String>();
+                    current_spans.push(Span::styled("[", theme.marker));
                     current_spans.push(Span::styled(text, theme.link));
-                    current_spans.push(Span::styled(
-                        format!(" ({url})"),
-                        theme.link.add_modifier(Modifier::DIM),
-                    ));
+                    current_spans.push(Span::styled("](", theme.marker));
+                    current_spans.push(Span::styled(url, theme.link.add_modifier(Modifier::DIM)));
+                    current_spans.push(Span::styled(")", theme.marker));
                 }
             }
 
@@ -256,39 +322,26 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                let inner_width = code_block_lines.iter().map(String::len).max().unwrap_or(0);
-                let padded_width = inner_width + 4;
-                let empty_line = " ".repeat(padded_width);
 
                 let syntax = ss
                     .find_syntax_by_token(&code_block_lang)
                     .or_else(|| ss.find_syntax_by_name(&code_block_lang))
                     .unwrap_or_else(|| ss.find_syntax_plain_text());
-                let theme_bg =
-                    syn_theme
-                        .settings
-                        .background
-                        .unwrap_or(syntect::highlighting::Color {
-                            r: 0x27,
-                            g: 0x28,
-                            b: 0x22,
-                            a: 0xff,
-                        });
-                let bg = Color::Rgb(theme_bg.r, theme_bg.g, theme_bg.b);
                 let mut highlighter = HighlightLines::new(syntax, syn_theme);
+                let bg_style = theme.code_block_bg;
+                let open_fence = format!("```{code_block_lang}");
 
                 result.lines.push(Line::default());
-                result.lines.push(Line::from(Span::styled(
-                    empty_line.clone(),
-                    Style::default().bg(bg),
-                )));
+                result
+                    .lines
+                    .push(Line::from(Span::styled(open_fence, theme.marker)));
                 for code_line in code_block_lines.drain(..) {
-                    let padding = " ".repeat(padded_width - code_line.len() - 2);
-                    let padded_line = format!("  {code_line}{padding}");
                     let ranges = highlighter
-                        .highlight_line(&padded_line, ss)
+                        .highlight_line(&code_line, ss)
                         .unwrap_or_default();
-                    let spans: Vec<Span<'static>> = ranges
+                    let text_width: usize = ranges.iter().map(|(_, t)| t.width()).sum();
+                    let bg = bg_style.bg.unwrap_or_default();
+                    let mut spans: Vec<Span<'static>> = ranges
                         .into_iter()
                         .map(|(style, text)| {
                             let fg = style.foreground;
@@ -298,12 +351,13 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
                             )
                         })
                         .collect();
+                    let padding = CODE_WIDTH.saturating_sub(text_width);
+                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
                     result.lines.push(Line::from(spans));
                 }
-                result.lines.push(Line::from(Span::styled(
-                    empty_line,
-                    Style::default().bg(bg),
-                )));
+                result
+                    .lines
+                    .push(Line::from(Span::styled("```", theme.marker)));
                 result.lines.push(Line::default());
             }
 
@@ -372,7 +426,16 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
             }
 
             Event::Code(text) => {
-                current_spans.push(Span::styled(text.to_string(), theme.code_inline));
+                if link_url.is_none() && !in_blockquote {
+                    let restore = active_style(in_bold, in_italic, in_strikethrough, theme);
+                    push_marker(&mut current_spans, "`", theme.marker, Style::default());
+                    current_spans.push(Span::styled(text.to_string(), theme.code_inline));
+                    push_marker(&mut current_spans, "`", theme.marker, restore);
+                } else if link_url.is_some() {
+                    link_text.push(text.to_string());
+                } else {
+                    current_spans.push(Span::styled(text.to_string(), theme.code_inline));
+                }
             }
 
             Event::Text(text) => {
@@ -393,9 +456,7 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
                 } else {
                     let style = match (in_bold, in_italic, in_strikethrough) {
                         (_, _, true) => theme.strikethrough,
-                        (true, true, _) => Style::default()
-                            .add_modifier(Modifier::BOLD)
-                            .add_modifier(Modifier::ITALIC),
+                        (true, true, _) => theme.italic.add_modifier(Modifier::BOLD),
                         (true, false, _) => theme.bold,
                         (false, true, _) => theme.italic,
                         (false, false, _) => {
@@ -438,7 +499,7 @@ pub fn render(slide: &Slide, theme: &Theme) -> RenderedSlide {
 }
 
 fn cell_text_len(cell: &[StyledText]) -> usize {
-    cell.iter().map(|s| s.text.len()).sum()
+    cell.iter().map(|s| s.text.width()).sum()
 }
 
 fn render_table(ts: &TableState, theme: &Theme, lines: &mut Vec<Line<'static>>) {
@@ -572,6 +633,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect::<String>()
+            .replace('\u{200B}', "")
     }
 
     #[test]
@@ -604,8 +666,8 @@ mod tests {
         let out = rendered_text("[rust](https://rust-lang.org)");
         assert!(out.contains("rust"), "link text should appear");
         assert!(
-            out.contains("(https://rust-lang.org)"),
-            "link URL should appear in parens"
+            out.contains("](https://rust-lang.org)"),
+            "link URL should appear in markdown link syntax"
         );
     }
 
@@ -653,27 +715,33 @@ mod tests {
     // Inline formatting
 
     #[test]
-    fn inline_code_appears_in_output() {
+    fn inline_code_appears_with_backtick_markers() {
         let out = rendered_text("use `foo()` here");
-        assert!(out.contains("foo()"));
+        assert!(
+            out.contains("`foo()`"),
+            "inline code should show backtick markers"
+        );
     }
 
     #[test]
-    fn bold_text_appears_in_output() {
+    fn bold_text_appears_with_markers() {
         let out = rendered_text("**important**");
-        assert!(out.contains("important"));
+        assert!(out.contains("**important**"), "bold should show ** markers");
     }
 
     #[test]
-    fn italic_text_appears_in_output() {
+    fn italic_text_appears_with_markers() {
         let out = rendered_text("_emphasis_");
-        assert!(out.contains("emphasis"));
+        assert!(out.contains("*emphasis*"), "italic should show * markers");
     }
 
     #[test]
-    fn strikethrough_text_appears_in_output() {
+    fn strikethrough_text_appears_with_markers() {
         let out = rendered_text("~~deleted~~");
-        assert!(out.contains("deleted"));
+        assert!(
+            out.contains("~~deleted~~"),
+            "strikethrough should show ~~ markers"
+        );
     }
 
     // Lists
