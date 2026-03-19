@@ -5,6 +5,9 @@ on:
     workflows: [Release Please]
     types: [completed]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -57,7 +60,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           BIN=target/${{ matrix.target }}/release/pres
-          ARCHIVE=pres-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz
+          ARCHIVE=${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz
           tar czf $ARCHIVE -C target/${{ matrix.target }}/release pres
           echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
 
@@ -65,7 +68,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          ARCHIVE=pres-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.zip
+          ARCHIVE=${{ steps.tag.outputs.tag }}-${{ matrix.target }}.zip
           cd target/${{ matrix.target }}/release
           7z a ../../../$ARCHIVE pres.exe
           echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
