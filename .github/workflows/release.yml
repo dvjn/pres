@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [Release Please]
+    types: [completed]
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Get release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Add target
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN=target/${{ matrix.target }}/release/pres
+          ARCHIVE=pres-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz
+          tar czf $ARCHIVE -C target/${{ matrix.target }}/release pres
+          echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ARCHIVE=pres-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.zip
+          cd target/${{ matrix.target }}/release
+          7z a ../../../$ARCHIVE pres.exe
+          echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ steps.tag.outputs.tag }} ${{ env.ASSET }}
+        shell: bash
